@@ -4,6 +4,7 @@
 from socket import socket, AF_INET as ipv4, SOCK_DGRAM as connectionless, timeout, inet_aton
 import os
 from time import sleep
+from threading import Thread
 class SendUDP:
     # TODO: Write a concise description.
     '''
@@ -16,7 +17,7 @@ class SendUDP:
         self._header_size = 10  # TODO: Add this to config file
         self.file_name = str()
         self.local_port = int()
-        self.mode = int()
+        self.mode = 0
         self.mode_parameter = int()
         self.timeout = int()
         self.receiver = tuple[str, int]  # (ip_addr, port)
@@ -135,17 +136,16 @@ class SendUDP:
 
         if self.get_mode() == 0:
             return self._send_file_stw()
-        elif self.get_mode() == 1:
+        if self.get_mode() == 1:
             return self._send_file_sw()
-        else:
-            return False
+        return False
 
     def _send_file_stw(self) -> bool:
         # This is our sender and receiver
         sender = socket(ipv4, connectionless)
         
         # socket.settimeout(timeout: float) takes its time out in seconds, so we convert
-        _timeout = float(self.timeout * 1e-3)  # milliseconds -> seconds
+        _timeout = float(self.get_timeout() * 1e-3)  # milliseconds -> seconds
         sender.settimeout(_timeout)
 
 
@@ -160,7 +160,10 @@ class SendUDP:
         with open(self.get_filename(), "rb") as f:
             # Windows '\r\n' line carriage return gets read by python as two new lines... for some reason.
             # So, we just replace \r\n with \n
-            data = f.read().replace(bytes("\r\n", encoding = "ascii"), bytes("\n", encoding = "ascii"))
+            data = f.read().replace(
+                bytes("\r\n", encoding = "ascii"),
+                bytes("\n", encoding = "ascii")
+            )
 
         packet_size = self._mtu - self._header_size
         # Turn the data into `packet_size`d slices for transmission.
@@ -190,27 +193,123 @@ class SendUDP:
                 print("There are no valid receivers to receive this data exitting...")
                 sender.close()
                 return False
-            except Exception as e:
-                print(f"{e}")
-                sender.close()
-                return False
-            
+
         return True
 
 
     def _send_file_sw(self) -> bool:
-        return False
+        '''
+        Internal method, use at your own risk.
+        Sends data using the sliding window protocol over UDP.
+        '''
+        sender = socket(ipv4, connectionless)
 
-    def _make_header(self, packet_number: int, packet_count: int, listening_ip: str, listening_port: int) -> bytes:
+        sender.settimeout(self.get_timeout() * 1e-3)
+
+        packet_size = self._mtu - self._header_size
+
+        # mode_parameter is the window size, so we divide window size by packet size
+        # we get the number of packets we can send at once
+        max_packets_in_transit = self.get_modeparameter() // packet_size
+
+        # suppose the window size is smaller than the packet size,
+        # then we can't fit one packet in a window, in this case
+        # we basically fall back to stop-and-wait by doing sliding window
+        # with one packet in transit
+        max_packets_in_transit = max_packets_in_transit if max_packets_in_transit >= 1 else 1
+        print(max_packets_in_transit)
+        listening_port = self.get_localport()
+
+        with open(self.get_filename(), "rb") as f:
+            # Windows '\r\n' line carriage return gets read by python as two new lines... 
+            # for some reason. So, we just replace \r\n with \n
+            data = f.read().replace(
+                bytes("\r\n", encoding = "ascii"),
+                bytes("\n", encoding = "ascii")
+            )
+
+        data = [data[x: x + packet_size] for x in range(0, len(data), packet_size)]
+        data_iter = iter(data)
+        num_packets = len(data)
+        sent = {
+            'in_transit' : 0
+        }
+
+        recv = socket(ipv4, connectionless)
+        recv.bind(('localhost', self.get_localport()))
+        recv.settimeout(0.1)
+        listening_ip = recv.getsockname()[0]  # (ip_addr, port)[0] = ip_addr
+        ack_thread = Thread(target = self._ack_thread, args = (recv, sent, num_packets))
+        ack_thread.start()
+        packet_no = 1
+        while True:
+            # If: the number of packets in transit is less than the max
+            # then: send more
+            if max_packets_in_transit > sent['in_transit']:
+                try:
+                    sender.sendto(
+                        self._make_header(
+                            packet_no, num_packets, listening_ip, listening_port
+                        ) + next(data_iter),
+                        self.get_receiver()
+                    )
+                    print(f"Message {packet_no} sent with {packet_size} bytes of actual data")
+                    sent['in_transit'] += 1
+                # sent all dae packets
+                except StopIteration:
+                    sender.close()
+                    break
+                packet_no += 1
+        # Manage lost packets
+        # Check for non-acked packets
+        ack_thread.join()
+        assert self._debug_check_all_sent(sent, num_packets)
+        return True
+
+    def _make_header(
+            self,
+            packet_number: int,
+            packet_count: int,
+            listening_ip: str,
+            listening_port: int
+        ) -> bytes:
         packet_number = packet_number.to_bytes(length = 2, signed = False)
         packet_count = packet_count.to_bytes(length = 2, signed = False)
         listening_ip = inet_aton(listening_ip)
         listening_port = listening_port.to_bytes(length = 2, signed = False)
         return packet_count + packet_number + listening_ip + listening_port
-    
+
     def _check_ack(self, packet) -> bool:
-        if int.from_bytes(packet[0:4]) == 255:
+        if int.from_bytes(packet[0:1]) == 255:
             return True
         return False
 
+    def _ack_num(self, packet) -> int:
+        if not self._check_ack(packet):
+            return -1
+        return int.from_bytes(packet[1:])
+
+    def _ack_thread(self, recv: socket, sent: dict, num_packets: int):
+        acking = True
+        while acking:
+            try:
+                data, _ = recv.recvfrom(self._mtu)
+            except timeout:
+                continue
+            ack_num = self._ack_num(data)
+            print(f"Message {ack_num} acknowledged")
+            sent[ack_num] = True
+            sent['in_transit'] -= 1
+            num_packets -= 1
+            acking = not num_packets <= 0
+
+    #endregion
+    #region debug
+    def _debug_check_all_sent(self, sent: dict, num_packets) -> bool:
+        for i in range(1, num_packets + 1):
+            if sent[i] is True:
+                continue
+            print(f"packet {i} not sent!")
+            return False
+        return True
     #endregion
