@@ -141,28 +141,47 @@ class SendUDP:
             return False
 
     def _send_file_stw(self) -> bool:
-        _timeout = float(self.timeout * 1e-3)  # milliseconds -> seconds
+        # This is our sender and receiver
         sender = socket(ipv4, connectionless)
-        listening_ip = '127.0.0.1'
-        listening_port = self.get_localport()
-        sender.bind(("localhost", self.get_localport()))
+        
+        # socket.settimeout(timeout: float) takes its time out in seconds, so we convert
+        _timeout = float(self.timeout * 1e-3)  # milliseconds -> seconds
         sender.settimeout(_timeout)
 
+
+        sender.bind(("localhost", self.get_localport()))
+
+        # This is info to transmit in the header to the receiver.
+        # Theoretically, the receiver knows the sender's ip by virtue of receiving the packet,
+        # so we don't need this.
+        listening_ip = sender.getsockname()[0]  # (ip_addr, port)[0] = ip_addr
+        listening_port = self.get_localport()
+
         with open(self.get_filename(), "rb") as f:
-            data = f.read()
+            # Windows '\r\n' line carriage return gets read by python as two new lines... for some reason.
+            # So, we just replace \r\n with \n
+            data = f.read().replace(bytes("\r\n", encoding = "ascii"), bytes("\n", encoding = "ascii"))
 
         packet_size = self._mtu - self._header_size
+        # Turn the data into `packet_size`d slices for transmission.
+        # This code will need to be modified if we choose a different encoding than ASCII
         data = [data[x: x + packet_size] for x in range(0, len(data), packet_size)]
         packet_count = len(data)
 
         for i, datum in enumerate(data, start = 1):
-            print(f"sending {packet_size}B of actual data.")
-            sender.sendto(self._make_header(i, packet_count, listening_ip, listening_port) + datum, self.get_receiver())
-            sleep(0.2)
+            print(f"Message {i} sent with {packet_size} bytes of actual data")
+            sender.sendto(
+                self._make_header(i, packet_count, listening_ip, listening_port) + datum, # data
+                self.get_receiver()                                                       # adress
+            )
+            # Can play with this sleep value, to try and get faster sends.
+            sleep(0.01)
             try:
+                # If this doesn't receive an ack IMMEDIATELY, it will throw WinError [10035].
+                # Need to find a way to actually enforce the timeout in this case.
                 data, _ = sender.recvfrom(self._mtu)
                 if self._check_ack(data):
-                    print("Received Acknowledgement!")
+                    print(f"Message {i} acknowledged")
                     continue
             except timeout:
                 sender.close()
