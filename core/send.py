@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 '''
 `send` is a module for sending UDP Datagrams.
 '''
@@ -5,21 +6,20 @@ from socket import socket, AF_INET as ipv4, SOCK_DGRAM as connectionless, timeou
 import os
 from time import sleep
 from threading import Thread
+import tomllib
 class SendUDP:
-    # TODO: Write a concise description.
     '''
-    Docstring to make the linter stop complaining
+    Class for handling file transfer over UDP.
+    `Stop-and-wait` and `sliding window` algorithms supported.
     '''
-    # TODO: Does it make sense to have overloads for different parameter combinations?
     def __init__(self):
-        # TODO: Add sensible defaults.
-        self._mtu = 1500  # TODO: make toml config file and make this changeable there.
-        self._header_size = 10  # TODO: Add this to config file
+        with open("config.toml", "r", encoding = "utf-8") as f:
+            self.config = tomllib.loads(f.read())
         self.file_name = str()
-        self.local_port = int()
+        self.local_port = 12987
         self.mode = 0
         self.mode_parameter = int()
-        self.timeout = int()
+        self.timeout = 10000
         self.receiver = tuple[str, int]  # (ip_addr, port)
 
     # Doing getters and setter to confrom to the project specifications,
@@ -70,7 +70,6 @@ class SendUDP:
         Setter method for filename field.
 
         :param filename: symbolic link of the intended transfer file
-        :raises AssertionError: filename must exist on the sending machine
         '''
         if not os.path.exists(filename):
             return False
@@ -84,6 +83,9 @@ class SendUDP:
 
         :param port: Port for the local machine to bind to
         '''
+        if port < 0 or port > 65535:
+            return False
+
         self.local_port = port
         return True
 
@@ -114,6 +116,10 @@ class SendUDP:
 
         :param receiver: (ip_address, port) tuple for socket connection
         '''
+        port = receiver[1]
+        if port < 0 or port > 65535:
+            return False
+
         self.receiver = receiver
         return True
 
@@ -156,16 +162,13 @@ class SendUDP:
         # so we don't need this.
         listening_ip = sender.getsockname()[0]  # (ip_addr, port)[0] = ip_addr
         listening_port = self.get_localport()
-        
-        with open(self.get_filename(), "rb") as f:
-            # Windows '\r\n' line carriage return gets read by python as two 
-            # new lines... for some reason. So, we just replace \r\n with \n
-            data = f.read().replace(
-                bytes("\r\n", encoding = "ascii"),
-                bytes("\n", encoding = "ascii")
-            )
 
-        packet_size = self._mtu - self._header_size
+        with open(self.get_filename(), "rb") as f:
+            # Windows '\r\n' line carriage return gets read by python as two
+            # new lines... for some reason. So, we just replace \r\n with \n
+            data = f.read()
+
+        packet_size = self.config['mtu'] - self.config['header_size']
         # Turn the data into `packet_size`d slices for transmission.
         # This code will need to be modified if we choose a different encoding than ASCII
         data = [data[x: x + packet_size] for x in range(0, len(data), packet_size)]
@@ -175,14 +178,14 @@ class SendUDP:
             print(f"Message {i} sent with {packet_size} bytes of actual data")
             sender.sendto(
                 self._make_header(i, packet_count, listening_ip, listening_port) + datum, # data
-                self.get_receiver()                                                       # adress
+                self.get_receiver()                                                       # address
             )
             # Can play with this sleep value, to try and get faster sends.
             sleep(0.01)
             try:
                 # If this doesn't receive an ack IMMEDIATELY, it will throw WinError [10035].
                 # Need to find a way to actually enforce the timeout in this case.
-                data, _ = sender.recvfrom(self._mtu)
+                data, _ = sender.recvfrom(self.config['mtu'])
                 if self._check_ack(data):
                     print(f"Message {i} acknowledged")
                     continue
@@ -198,15 +201,11 @@ class SendUDP:
 
 
     def _send_file_sw(self) -> bool:
-        '''
-        Internal method, use at your own risk.
-        Sends data using the sliding window protocol over UDP.
-        '''
         sender = socket(ipv4, connectionless)
 
         sender.settimeout(self.get_timeout() * 1e-3)
 
-        packet_size = self._mtu - self._header_size
+        packet_size = self.config['mtu'] - self.config['header_size']
 
         # mode_parameter is the window size, so we divide window size by packet size
         # we get the number of packets we can send at once
@@ -217,11 +216,10 @@ class SendUDP:
         # we basically fall back to stop-and-wait by doing sliding window
         # with one packet in transit
         max_packets_in_transit = max_packets_in_transit if max_packets_in_transit >= 1 else 1
-        print(max_packets_in_transit)
         listening_port = self.get_localport()
 
         with open(self.get_filename(), "rb") as f:
-            # Windows '\r\n' line carriage return gets read by python as two new lines... 
+            # Windows '\r\n' line carriage return gets read by python as two new lines...
             # for some reason. So, we just replace \r\n with \n
             data = f.read()
 
@@ -232,6 +230,7 @@ class SendUDP:
             'in_transit' : 0
         }
 
+        # Make the recv socket
         recv = socket(ipv4, connectionless)
         recv.bind(('localhost', self.get_localport()))
         recv.settimeout(0.1)
@@ -290,7 +289,7 @@ class SendUDP:
         acking = True
         while acking:
             try:
-                data, _ = recv.recvfrom(self._mtu)
+                data, _ = recv.recvfrom(self.config['mtu'])
             except timeout:
                 continue
             ack_num = self._ack_num(data)
@@ -304,7 +303,7 @@ class SendUDP:
     #region debug
     def _debug_check_all_sent(self, sent: dict, num_packets) -> bool:
         for i in range(1, num_packets + 1):
-            if sent[i] is True:
+            if i in sent and sent[i] is True:
                 continue
             print(f"packet {i} not sent!")
             return False

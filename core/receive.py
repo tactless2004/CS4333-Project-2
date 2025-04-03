@@ -1,6 +1,8 @@
+# pylint: disable=duplicate-code
 '''
-receive is a class for receiving UDP datagrams.
+`receive` is a class for receiving UDP datagrams.
 '''
+import tomllib
 from socket import(
     socket, AF_INET as ipv4,
     SOCK_DGRAM as connectionless,
@@ -13,10 +15,11 @@ class ReceiveUDP:
     ReceiveUDP is an interface for receiving files over UDP.
     '''
     def __init__(self):
-        self._mtu = 1500  # TODO: make toml config file and make this changeable there.
+        with open("config.toml", "r", encoding="utf-8") as f:
+            self.config = tomllib.loads(f.read())
         self.file_name = str()
         self.local_port = int()
-        self.mode = int()
+        self.mode = 0
         self.mode_parameter = int()
 
     #region getters
@@ -62,6 +65,9 @@ class ReceiveUDP:
 
         :param port: Port for the local machine to bind to
         '''
+        if port < 0 or port > 65535:
+            return False
+
         self.local_port = port
         return True
 
@@ -71,6 +77,8 @@ class ReceiveUDP:
 
         :param mode: 0 indiciates stop-and-wait; 1 indiciates sliding window
         '''
+        if not mode in [0, 1]:
+            return False
 
         self.mode = mode
         return True
@@ -81,7 +89,7 @@ class ReceiveUDP:
 
         :param mode_parameter: mode_parameter is an optional field used by some modes
         '''
-        self. mode_parameter = mode_parameter
+        self.mode_parameter = mode_parameter
         return True
     #endregion
     #region recv
@@ -107,7 +115,7 @@ class ReceiveUDP:
         data = {}
         while recv:
             # 1. Get Data
-            datum, _ = receive.recvfrom(self._mtu)
+            datum, _ = receive.recvfrom(self.config['mtu'])
 
             # 2. Strip header values
             packet_count = int.from_bytes(datum[0:2])
@@ -153,7 +161,7 @@ class ReceiveUDP:
             if first_receive:
                 try:
                     # Receive the first data packet
-                    datum, _ = recv.recvfrom(self._mtu)
+                    datum, _ = recv.recvfrom(self.config['mtu'])
                     # Parse the packet out
                     packet_count = int.from_bytes(datum[0:2])
                     packet_no = int.from_bytes(datum[2:4])
@@ -177,11 +185,8 @@ class ReceiveUDP:
                         break
                 except timeout:
                     continue
-                except KeyboardInterrupt:
-                    recv.close()
-                    return False
             try:
-                datum, _ = recv.recvfrom(self._mtu)
+                datum, _ = recv.recvfrom(self.config['mtu'])
                 packet_no = int.from_bytes(datum[2:4])
                 data[packet_no] = datum[10:]
                 received['to_ack'].append(packet_no)
@@ -190,6 +195,7 @@ class ReceiveUDP:
             except timeout:
                 continue
         ack_thread.join()
+        assert received['acked'] == received['packet_count']
         return self._write_data(data)
 
     def _write_data(self, data: dict) -> bool:
