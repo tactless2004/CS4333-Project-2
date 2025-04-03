@@ -143,7 +143,7 @@ class SendUDP:
     def _send_file_stw(self) -> bool:
         # This is our sender and receiver
         sender = socket(ipv4, connectionless)
-        
+
         # socket.settimeout(timeout: float) takes its time out in seconds, so we convert
         _timeout = float(self.get_timeout() * 1e-3)  # milliseconds -> seconds
         sender.settimeout(_timeout)
@@ -156,10 +156,10 @@ class SendUDP:
         # so we don't need this.
         listening_ip = sender.getsockname()[0]  # (ip_addr, port)[0] = ip_addr
         listening_port = self.get_localport()
-
+        
         with open(self.get_filename(), "rb") as f:
-            # Windows '\r\n' line carriage return gets read by python as two new lines... for some reason.
-            # So, we just replace \r\n with \n
+            # Windows '\r\n' line carriage return gets read by python as two 
+            # new lines... for some reason. So, we just replace \r\n with \n
             data = f.read().replace(
                 bytes("\r\n", encoding = "ascii"),
                 bytes("\n", encoding = "ascii")
@@ -223,10 +223,7 @@ class SendUDP:
         with open(self.get_filename(), "rb") as f:
             # Windows '\r\n' line carriage return gets read by python as two new lines... 
             # for some reason. So, we just replace \r\n with \n
-            data = f.read().replace(
-                bytes("\r\n", encoding = "ascii"),
-                bytes("\n", encoding = "ascii")
-            )
+            data = f.read()
 
         data = [data[x: x + packet_size] for x in range(0, len(data), packet_size)]
         data_iter = iter(data)

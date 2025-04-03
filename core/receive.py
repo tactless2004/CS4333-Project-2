@@ -1,8 +1,13 @@
 '''
 receive is a class for receiving UDP datagrams.
 '''
-import os
-from socket import socket, AF_INET as ipv4, SOCK_DGRAM as connectionless, inet_ntoa as decode_ip
+from socket import(
+    socket, AF_INET as ipv4,
+    SOCK_DGRAM as connectionless,
+    inet_ntoa as decode_ip,
+    timeout  # socket.timeout exception
+)
+from threading import Thread
 class ReceiveUDP:
     '''
     ReceiveUDP is an interface for receiving files over UDP.
@@ -92,8 +97,6 @@ class ReceiveUDP:
             return self._receive_stw()
         if self.get_mode() == 1:
             return self._receive_sw()
-
-        print("FART")
         return False
 
     def _receive_stw(self):
@@ -126,13 +129,96 @@ class ReceiveUDP:
         return self._write_data(data)
 
     def _receive_sw(self) -> bool:
-        pass
+        recv = socket(ipv4, connectionless)
+        recv.bind(('localhost', self.get_localport()))
+        recv.settimeout(0.2)
+
+        received = {
+            'inited' : False,
+            'packet_count' : int(),
+            'to_ack' : [],
+            'sender' : tuple[str, int],
+            'acked' : 0
+        }
+        ack_thread = Thread(target = self._ack_sender, args = (received,))
+        ack_thread.start()
+
+        data = {}
+
+
+        receiving = True
+        first_receive = True
+        packet_count = 0
+        while receiving:
+            if first_receive:
+                try:
+                    # Receive the first data packet
+                    datum, _ = recv.recvfrom(self._mtu)
+                    # Parse the packet out
+                    packet_count = int.from_bytes(datum[0:2])
+                    packet_no = int.from_bytes(datum[2:4])
+                    ip_addr = decode_ip(datum[4:8])
+                    port = int.from_bytes(datum[8:10])
+                    data[packet_no] = datum[10:]
+
+                    # Set 'env variables'
+                    # received['packet_count'] tells _ack_sender() when its acked all packets
+                    # this variable should be considered READONLY.
+                    received['packet_count'] = packet_count
+                    received['sender'] = (ip_addr, port)
+                    received['to_ack'].append(packet_no)
+                    received['inited'] = True
+
+                    # Now do normal receive
+                    first_receive = False
+
+                    packet_count -= 1
+                    if received['packet_count'] == 1:
+                        break
+                except timeout:
+                    continue
+                except KeyboardInterrupt:
+                    recv.close()
+                    return False
+            try:
+                datum, _ = recv.recvfrom(self._mtu)
+                packet_no = int.from_bytes(datum[2:4])
+                data[packet_no] = datum[10:]
+                received['to_ack'].append(packet_no)
+                packet_count -= 1
+                receiving = packet_count > 0
+            except timeout:
+                continue
+        ack_thread.join()
+        return self._write_data(data)
 
     def _write_data(self, data: dict) -> bool:
         datum_count = len(data.keys())
-        data = "".join([data[x].decode("ascii") for x in range(1, datum_count+1)])
-        with open(self.get_filename(), "w", encoding = "ascii") as f:
+        data = b"".join([data[x] for x in range(1, datum_count+1)])
+        with open(self.get_filename(), "wb") as f:
             f.write(data)
 
         return True
+
+    def _build_ack(self, ack_num: int) -> bytes:
+        return bytes(int(255).to_bytes() + ack_num.to_bytes(length = 2))
+
+    def _ack_sender(self, received: dict):
+        while not received['inited']:
+            continue
+
+        sender = socket(ipv4, connectionless)
+        acking = True
+
+        while acking:
+            if received['to_ack'] != []:
+                ack_num = received['to_ack'].pop(0)
+                sender.sendto(
+                    self._build_ack(ack_num),
+                    received['sender']
+                )
+                received['acked'] += 1
+            acking = received['acked'] < received['packet_count']
+        sender.close()
+
     #endregion
