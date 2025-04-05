@@ -1,0 +1,2 @@
+mtu = 1500
+header_size = 10

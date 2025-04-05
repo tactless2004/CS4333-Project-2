@@ -216,16 +216,20 @@ class SendUDP:
         # we basically fall back to stop-and-wait by doing sliding window
         # with one packet in transit
         max_packets_in_transit = max_packets_in_transit if max_packets_in_transit >= 1 else 1
-        listening_port = self.get_localport()
 
         with open(self.get_filename(), "rb") as f:
-            # Windows '\r\n' line carriage return gets read by python as two new lines...
-            # for some reason. So, we just replace \r\n with \n
             data = f.read()
 
+        # Slice the array into packet_sized slices,
+        # Each element of this list is one packet sans header.
         data = [data[x: x + packet_size] for x in range(0, len(data), packet_size)]
+
+        # I prefer the next(Iterable) pattern to iterating over a list with a for loop
         data_iter = iter(data)
-        num_packets = len(data)
+
+        # This dictionary keeps track of the packets sent
+        # This has two purposes:
+        #   1.) At the end verify all packets are sent
         sent = {
             'in_transit' : 0
         }
@@ -234,15 +238,22 @@ class SendUDP:
         recv = socket(ipv4, connectionless)
         recv.bind(('localhost', self.get_localport()))
         recv.settimeout(0.1)
+
+        # Header Values:
         listening_ip = recv.getsockname()[0]  # (ip_addr, port)[0] = ip_addr
+        listening_port = self.get_localport()
+        num_packets = len(data)
+        packet_iter = iter(range(1, num_packets + 1))
+
+        # Start the acknowledgement thread
         ack_thread = Thread(target = self._ack_thread, args = (recv, sent, num_packets))
         ack_thread.start()
-        packet_no = 1
         while True:
             # If: the number of packets in transit is less than the max
             # then: send more
             if max_packets_in_transit > sent['in_transit']:
                 try:
+                    packet_no = next(packet_iter)
                     sender.sendto(
                         self._make_header(
                             packet_no, num_packets, listening_ip, listening_port
@@ -251,16 +262,27 @@ class SendUDP:
                     )
                     print(f"Message {packet_no} sent with {packet_size} bytes of actual data")
                     sent['in_transit'] += 1
-                # sent all dae packets
+
                 except StopIteration:
-                    sender.close()
-                    break
-                packet_no += 1
-        # Manage lost packets
-        # Check for non-acked packets
-        ack_thread.join()
-        assert self._debug_check_all_sent(sent, num_packets)
-        return True
+                    # wait ack thread
+                    ack_thread.join()
+
+                    # If all packets are acked, exit.
+                    if self._debug_check_all_sent(sent, num_packets):
+                        sender.close()
+                        break
+
+                    # If all packets not acked, repopulate data and packet_no iter:
+                    data_iter, packet_iter = self._recreate_packet_iters(sent, data)
+
+                    # Re-run ack thread
+                    ack_thread = Thread(
+                        target = self._ack_thread,
+                        args = (sent, len(list(data_iter)))
+                    )
+                    ack_thread.start()
+
+        return self._debug_check_all_sent(sent, num_packets)
 
     def _make_header(
             self,
@@ -291,6 +313,7 @@ class SendUDP:
             try:
                 data, _ = recv.recvfrom(self.config['mtu'])
             except timeout:
+                print("timeout")
                 continue
             ack_num = self._ack_num(data)
             print(f"Message {ack_num} acknowledged")
@@ -299,6 +322,18 @@ class SendUDP:
             num_packets -= 1
             acking = not num_packets <= 0
 
+    def _recreate_packet_iters(self, sent: dict, data: dict) -> tuple[iter, iter]:
+        # Gather all non-acked packets
+        unacked_data = []
+        packet_nos = []
+        for i, packet in enumerate(data, start = 1):
+            if i in sent and sent[i]:
+                continue
+            unacked_data.append(packet)
+            packet_nos.append(i)
+
+        # reset packet_no iter and data iter
+        return (iter(unacked_data), iter(packet_nos))
     #endregion
     #region debug
     def _debug_check_all_sent(self, sent: dict, num_packets) -> bool:
