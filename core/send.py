@@ -2,7 +2,14 @@
 '''
 `send` is a module for sending UDP Datagrams.
 '''
-from socket import socket, AF_INET as ipv4, SOCK_DGRAM as connectionless, timeout, inet_aton
+from socket import(
+    socket,
+    AF_INET as ipv4,
+    SOCK_DGRAM as connectionless,
+    timeout,
+    inet_aton
+)
+import time
 import os
 from time import sleep
 from threading import Thread
@@ -18,7 +25,7 @@ class SendUDP:
         self.file_name = str()
         self.local_port = 12987
         self.mode = 0
-        self.mode_parameter = int()
+        self.mode_parameter = 256
         self.timeout = 10000
         self.receiver = tuple[str, int]  # (ip_addr, port)
 
@@ -170,10 +177,15 @@ class SendUDP:
 
         packet_size = self.config['mtu'] - self.config['header_size']
         # Turn the data into `packet_size`d slices for transmission.
-        # This code will need to be modified if we choose a different encoding than ASCII
         data = [data[x: x + packet_size] for x in range(0, len(data), packet_size)]
         packet_count = len(data)
+        print(
+            f"Sending from {sender.getsockname()} " +
+            "Stop-and-Wait" if self.get_mode() == 0 else "Sliding-Window"
+        )
 
+        printed_initial_connection = False
+        start_time = time.perf_counter()
         for i, datum in enumerate(data, start = 1):
             print(f"Message {i} sent with {packet_size} bytes of actual data")
             sender.sendto(
@@ -185,10 +197,14 @@ class SendUDP:
             try:
                 # If this doesn't receive an ack IMMEDIATELY, it will throw WinError [10035].
                 # Need to find a way to actually enforce the timeout in this case.
-                data, _ = sender.recvfrom(self.config['mtu'])
+                data, receiver = sender.recvfrom(self.config['mtu'])
                 if self._check_ack(data):
                     print(f"Message {i} acknowledged")
                     continue
+
+                if not printed_initial_connection:
+                    print(f"Sending file to {receiver}...")
+                    printed_initial_connection = True
             except timeout:
                 sender.close()
                 return False
@@ -196,7 +212,7 @@ class SendUDP:
                 print("There are no valid receivers to receive this data exitting...")
                 sender.close()
                 return False
-
+        print(f"Sent {self.config['mtu'] * len(data)} Bytes in {time.perf_counter() - start_time}")
         return True
 
 
@@ -231,7 +247,8 @@ class SendUDP:
         # This has two purposes:
         #   1.) At the end verify all packets are sent
         sent = {
-            'in_transit' : 0
+            'in_transit' : 0,
+            'printed_initial_connection' : False
         }
 
         # Make the recv socket
@@ -248,6 +265,11 @@ class SendUDP:
         # Start the acknowledgement thread
         ack_thread = Thread(target = self._ack_thread, args = (recv, sent, num_packets))
         ack_thread.start()
+        print(
+            f"Sending from {sender.getsockname()} " +
+            "Stop-and-Wait" if self.get_mode() == 0 else "Sliding-Window"
+        )
+        start_time = time.perf_counter()
         while True:
             # If: the number of packets in transit is less than the max
             # then: send more
@@ -281,7 +303,7 @@ class SendUDP:
                         args = (sent, len(list(data_iter)))
                     )
                     ack_thread.start()
-
+        print(f"Sent {self.config['mtu']*num_packets} in {time.perf_counter() - start_time}")
         return self._debug_check_all_sent(sent, num_packets)
 
     def _make_header(
@@ -311,7 +333,10 @@ class SendUDP:
         acking = True
         while acking:
             try:
-                data, _ = recv.recvfrom(self.config['mtu'])
+                data, receiver = recv.recvfrom(self.config['mtu'])
+                if not sent['printed_initial_connection']:
+                    print(f"Connected to {receiver} ...")
+                    sent['printed_initial_connection'] = True
             except timeout:
                 print("timeout")
                 continue

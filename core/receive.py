@@ -2,6 +2,7 @@
 '''
 `receive` is a class for receiving UDP datagrams.
 '''
+import time
 import tomllib
 from socket import(
     socket, AF_INET as ipv4,
@@ -20,7 +21,7 @@ class ReceiveUDP:
         self.file_name = str()
         self.local_port = int()
         self.mode = 0
-        self.mode_parameter = int()
+        self.mode_parameter = 256
 
     #region getters
     def get_filename(self):
@@ -112,10 +113,20 @@ class ReceiveUDP:
         receive.bind(("localhost", self.get_localport()))
         receive.settimeout(10.0)
         recv = True
+        printed_init_connection_message = False
         data = {}
+        print(
+            f"Receiving on {receive.getsockname()} using " +
+            "Stop-and-Wait..." if self.get_mode() == 0 else "Sliding-Window..."
+        )
+        start_time = time.perf_counter()
         while recv:
             # 1. Get Data
-            datum, _ = receive.recvfrom(self.config['mtu'])
+            datum, sender = receive.recvfrom(self.config['mtu'])
+
+            if not printed_init_connection_message:
+                print(f"Receiving from {sender}...")
+                printed_init_connection_message = True
 
             # 2. Strip header values
             packet_count = int.from_bytes(datum[0:2])
@@ -133,14 +144,17 @@ class ReceiveUDP:
             # 5. Is this the last packet? Yes -> write_data, exit; No -> get next packet
             if packet_no >= packet_count:
                 recv = False
-
+        print(f"File received in {time.perf_counter() - start_time}s")
         return self._write_data(data)
 
     def _receive_sw(self) -> bool:
         recv = socket(ipv4, connectionless)
         recv.bind(('localhost', self.get_localport()))
         recv.settimeout(0.2)
-
+        print(
+            f"Receiving on {recv.getsockname()} using " +
+            "Stop-and-Wait..." if self.get_mode() == 0 else "Sliding-Window..."
+        )
         received = {
             'inited' : False,
             'packet_count' : int(),
@@ -157,11 +171,13 @@ class ReceiveUDP:
         receiving = True
         first_receive = True
         packet_count = 0
+        start_time = time.perf_counter()
         while receiving:
             if first_receive:
                 try:
                     # Receive the first data packet
-                    datum, _ = recv.recvfrom(self.config['mtu'])
+                    datum, sender = recv.recvfrom(self.config['mtu'])
+                    print(f"Receiving from {sender}...")
                     # Parse the packet out
                     packet_count = int.from_bytes(datum[0:2])
                     packet_no = int.from_bytes(datum[2:4])
@@ -196,6 +212,7 @@ class ReceiveUDP:
                 continue
         ack_thread.join()
         assert received['acked'] == received['packet_count']
+        print(f"Received {len(data)*self.config['mtu']} in {time.perf_counter() - start_time}s")
         return self._write_data(data)
 
     def _write_data(self, data: dict) -> bool:
