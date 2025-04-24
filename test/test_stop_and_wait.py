@@ -5,8 +5,8 @@ Unit test for the Stop-and-Wait algorithm
 import os
 import hashlib
 from multiprocessing import Pool
-from core.send import SendUDP
-from core.receive import ReceiveUDP
+from core import SendUDP
+from core import ReceiveUDP
 
 def test_stop_and_wait():
     '''
@@ -51,3 +51,6 @@ def test_stop_and_wait():
 
     assert hash1 == hash2
     #endregion
+
+if __name__ == "__main__":
+    test_stop_and_wait()
